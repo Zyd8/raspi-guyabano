@@ -272,7 +272,7 @@ def start_camera_detection():
                     scanning_complete = False
                     print("Scan complete. Ready to continue.")
             else:
-                motor_forward(speed=60)
+                motor_forward(speed=70)
                 detect_ripe_tomatoes(frame, model)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
