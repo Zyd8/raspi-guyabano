@@ -52,7 +52,7 @@ gui_open = False
 servo_started = False
 scanning_complete = False
 gui_lock = Lock()
-last_detection_time = time.time()  # Track time of last detection
+last_detection_time = None  # Will be initialized when start button is clicked
 
 # ------------------ DISTANCE MEASUREMENT ------------------ #
 def get_distance():
@@ -79,6 +79,26 @@ def motor_forward(speed=50):
     GPIO.output(relay_pin, GPIO.LOW)
     print("Motor moving forward.")
 
+def show_motor_stop_gui():
+    global gui_open
+    with gui_lock:
+        if gui_open:
+            return
+        gui_open = True
+
+    def on_close():
+        global gui_open
+        with gui_lock:
+            gui_open = False
+        stop_root.destroy()
+
+    stop_root = tk.Tk()
+    stop_root.title("Conveyor Status")
+    tk.Label(stop_root, text="Conveyor has stopped", font=("Arial", 16)).pack(pady=10)
+    tk.Button(stop_root, text="OK", command=on_close, font=("Arial", 12)).pack(pady=10)
+    stop_root.protocol("WM_DELETE_WINDOW", on_close)
+    stop_root.mainloop()
+
 def motor_stop():
     GPIO.output(motor_in1, GPIO.LOW)
     GPIO.output(motor_in2, GPIO.LOW)
@@ -86,6 +106,7 @@ def motor_stop():
     GPIO.output(relay_pin, GPIO.HIGH)
     print("Relay OFF")
     print("Motor stopped.")
+    Thread(target=show_motor_stop_gui).start()
 
 # ------------------ SERVO CONTROL ------------------ #
 def set_angle(angle):
@@ -189,7 +210,7 @@ def detect_ripe_tomatoes(frame, model):
                     roi = np.expand_dims(roi, axis=0)
                     prediction = model.predict(roi)[0][0]
                     accuracy = prediction if prediction > 0.5 else 1 - prediction
-                    label = "Rotten" if prediction > 0.5 else "Fresh"
+                    label = "Bad Quality" if prediction > 0.5 else "Good Quality"
 
                     if accuracy < 0.95:
                         Thread(target=show_result_gui, args=(label, accuracy)).start()
@@ -225,14 +246,18 @@ def start_camera_detection():
                 break
                 
             # Check for timeout (45 seconds without detection)
-            current_time = time.time()
-            if current_time - last_detection_time > 45:
-                print("No object detected for 45 seconds. Stopping program.")
-                on_gui_close()
-                return
+            if last_detection_time is not None:  # Only check timeout if detection has started
+                current_time = time.time()
+                if current_time - last_detection_time > 45:
+                    print("No object detected for 45 seconds. Stopping program.")
+                    # Stop the conveyor motors before closing
+                    motor_stop()
+                    print("Conveyor stopped due to timeout.")
+                    time.sleep(1)  # Short delay to ensure command is processed
+                    return
 
             if dist <= 50:
-                motor_stop()
+                #motor_stop()
                 print("Object too close! Motor stopped.")
                 last_detection_time = time.time()  # Reset timer on object detection
                 if not servo_started:
@@ -258,14 +283,17 @@ def start_camera_detection():
 
 # ------------------ GUI BUTTON FUNCTIONS ------------------ #
 def on_start():
+    global last_detection_time
+    last_detection_time = time.time()  # Initialize timeout counter when start button is clicked
     start_button.config(state=tk.DISABLED)
     Thread(target=start_camera_detection, daemon=True).start()
 
 def on_reset():
     print("Resetting system...")
-    global servo_started, scanning_complete
+    global servo_started, scanning_complete, last_detection_time
     servo_started = False
     scanning_complete = False
+    last_detection_time = None  # Reset the timeout counter
     # Return servo to starting position
     set_angle(0)
     GPIO.output(relay_pin, GPIO.LOW)
