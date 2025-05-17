@@ -31,6 +31,13 @@ relay_pin = 21  # Relay pin added
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
+# ------------------ SERVO CONTROL ------------------ #
+def set_angle(angle):
+    duty = angle / 18 + 2
+    pwm.ChangeDutyCycle(duty)
+    time.sleep(0.5)
+    pwm.ChangeDutyCycle(0)
+
 # Initialize servo and set to 0 degrees
 GPIO.setup(servo_pin, GPIO.OUT)
 pwm = GPIO.PWM(servo_pin, 50)  # 50Hz (20ms PWM period)
@@ -38,12 +45,9 @@ pwm.start(0)  # Start with 0% duty cycle
 set_angle(0)  # Reset to 0 degrees on startup
 print("Servo reset to 0 degrees on startup")
 
+# Initialize other GPIOs
 GPIO.setup(TRIG, GPIO.OUT)
 GPIO.setup(ECHO, GPIO.IN)
-
-GPIO.setup(servo_pin, GPIO.OUT)
-pwm = GPIO.PWM(servo_pin, 50)  # 50Hz
-pwm.start(0)
 
 GPIO.setup(motor_in1, GPIO.OUT)
 GPIO.setup(motor_in2, GPIO.OUT)
@@ -104,12 +108,12 @@ def show_motor_stop_gui():
             gui_open = False
         stop_root.destroy()
 
-    stop_root = tk.Tk()
-    stop_root.title("Conveyor Status")
-    tk.Label(stop_root, text="Conveyor has stopped", font=("Arial", 16)).pack(pady=10)
-    tk.Button(stop_root, text="OK", command=on_close, font=("Arial", 12)).pack(pady=10)
-    stop_root.protocol("WM_DELETE_WINDOW", on_close)
-    stop_root.mainloop()
+    # stop_root = tk.Tk()
+    # stop_root.title("Conveyor Status")
+    # tk.Label(stop_root, text="Conveyor has stopped", font=("Arial", 16)).pack(pady=10)
+    # tk.Button(stop_root, text="OK", command=on_close, font=("Arial", 12)).pack(pady=10)
+    # stop_root.protocol("WM_DELETE_WINDOW", on_close)
+    # stop_root.mainloop()
 
 def motor_stop():
     global motor_running
