@@ -55,6 +55,7 @@ gui_lock = Lock()
 last_detection_time = None  # Will be initialized when start button is clicked
 distance_label = None  # Will hold reference to the distance label
 motor_running = False  # Track motor state
+program_running = True  # Track if program is running
 
 # ------------------ DISTANCE MEASUREMENT ------------------ #
 def get_distance():
@@ -246,11 +247,26 @@ def detect_guyabano(frame, model):
 cap = cv2.VideoCapture(0)
 data=False
 
+# ------------------ CLEANUP FUNCTION ------------------ #
+def cleanup():
+    global program_running
+    program_running = False
+    print("Cleaning up resources...")
+    # Stop the motor
+    motor_stop()
+    # Stop the servo
+    pwm.ChangeDutyCycle(0)
+    # Release camera
+    cap.release()
+    # Clean up GPIO
+    GPIO.cleanup()
+    print("Cleanup complete.")
+
 # ------------------ DETECTION PROCESS ------------------ #
 def start_camera_detection():
-    global servo_started, scanning_complete, last_detection_time
+    global servo_started, scanning_complete, last_detection_time, program_running
     try:
-        while True:
+        while program_running:
             dist = get_distance()
             print(f"Distance: {dist} cm")
             ret, frame = cap.read()
@@ -313,10 +329,23 @@ def start_camera_detection():
 
     except KeyboardInterrupt:
         print("Interrupted by user.")
+    finally:
+        cleanup()  # Ensure cleanup happens even if there's an error
+
+# Add signal handler for graceful shutdown
+import signal
+def signal_handler(signum, frame):
+    print("\nReceived signal to terminate. Cleaning up...")
+    cleanup()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 # ------------------ GUI BUTTON FUNCTIONS ------------------ #
 def on_start():
-    global last_detection_time
+    global last_detection_time, program_running
+    program_running = True
     last_detection_time = time.time()  # Initialize timeout counter when start button is clicked
     start_button.config(state=tk.DISABLED)
     Thread(target=start_camera_detection, daemon=True).start()
@@ -336,11 +365,7 @@ def on_reset():
 
 def on_gui_close():
     print("Exiting GUI and cleaning up resources...")
-    cap.release()
-    cv2.destroyAllWindows()
-    pwm.stop()
-    motor_pwm.stop()
-    GPIO.cleanup()
+    cleanup()
     main_root.destroy()
 
 def update_distance_label():
