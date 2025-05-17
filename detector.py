@@ -45,7 +45,7 @@ motor_pwm = GPIO.PWM(motor_en, 100)
 motor_pwm.start(0)
 
 GPIO.setup(relay_pin, GPIO.OUT)  # Relay setup
-GPIO.output(relay_pin, GPIO.LOW)  # Initial state: OFF (adjust if needed)
+GPIO.output(relay_pin, GPIO.HIGH)  # Initial state: OFF (adjust if needed)
 
 # ------------------ GLOBAL FLAGS ------------------ #
 gui_open = False
