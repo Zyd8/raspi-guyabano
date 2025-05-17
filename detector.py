@@ -53,6 +53,8 @@ servo_started = False
 scanning_complete = False
 gui_lock = Lock()
 last_detection_time = None  # Will be initialized when start button is clicked
+distance_label = None  # Will hold reference to the distance label
+motor_running = False  # Track motor state
 
 # ------------------ DISTANCE MEASUREMENT ------------------ #
 def get_distance():
@@ -72,12 +74,14 @@ def get_distance():
 
 # ------------------ MOTOR CONTROL ------------------ #
 def motor_forward(speed=50):
-    
-    GPIO.output(motor_in1, GPIO.HIGH)
-    GPIO.output(motor_in2, GPIO.LOW)
-    motor_pwm.ChangeDutyCycle(speed)
-    GPIO.output(relay_pin, GPIO.LOW)
-    print("Motor moving forward.")
+    global motor_running
+    if not motor_running:
+        GPIO.output(motor_in1, GPIO.HIGH)
+        GPIO.output(motor_in2, GPIO.LOW)
+        motor_pwm.ChangeDutyCycle(speed)
+        GPIO.output(relay_pin, GPIO.LOW)
+        motor_running = True
+        print("Motor moving forward.")
 
 def show_motor_stop_gui():
     global gui_open
@@ -100,13 +104,16 @@ def show_motor_stop_gui():
     stop_root.mainloop()
 
 def motor_stop():
-    GPIO.output(motor_in1, GPIO.LOW)
-    GPIO.output(motor_in2, GPIO.LOW)
-    motor_pwm.ChangeDutyCycle(0)
-    GPIO.output(relay_pin, GPIO.HIGH)
-    print("Relay OFF")
-    print("Motor stopped.")
-    Thread(target=show_motor_stop_gui).start()
+    global motor_running
+    if motor_running:
+        GPIO.output(motor_in1, GPIO.LOW)
+        GPIO.output(motor_in2, GPIO.LOW)
+        motor_pwm.ChangeDutyCycle(0)
+        GPIO.output(relay_pin, GPIO.HIGH)
+        motor_running = False
+        print("Relay OFF")
+        print("Motor stopped.")
+        Thread(target=show_motor_stop_gui).start()
 
 # ------------------ SERVO CONTROL ------------------ #
 def set_angle(angle):
@@ -117,14 +124,23 @@ def set_angle(angle):
 
 def rotate_servo_step_by_step():
     global servo_started, scanning_complete
-    
+
     # Scan positions
     angles = [0, 45, 90, 135, 180]
     for angle in angles:
         set_angle(angle)
         print(f"Stopped at {angle} degrees")
         time.sleep(1)
-    
+
+        # Capture image at each step and process it
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Couldn't capture image.")
+            continue
+
+        print(f"Processing image at {angle} degrees...")
+        detect_guyabano(frame, model)
+
     # Wait 1 second after last rotation
     print("Servo finished rotating. Waiting 1 second before turning ON the relay.")
     time.sleep(1)
@@ -132,18 +148,15 @@ def rotate_servo_step_by_step():
     # Turn ON the relay
     GPIO.output(relay_pin, GPIO.HIGH)
     print("Relay ON")
-    
-    # Wait for a moment with relay on
-    time.sleep(2)
-    
+
     # Return to starting position (0 degrees)
     print("Returning to starting position...")
     set_angle(0)
-    
+
     # Turn relay back off
     GPIO.output(relay_pin, GPIO.LOW)
     print("Relay OFF")
-    
+
     # Indicate that scanning is complete and reset servo flag
     scanning_complete = True
     servo_started = False
@@ -184,7 +197,7 @@ def show_result_gui(label, accuracy):
     result_root.mainloop()
 
 # ------------------ DETECTION FUNCTION ------------------ #
-def detect_ripe_tomatoes(frame, model):
+def detect_guyabano(frame, model):
     global last_detection_time
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     lower_red = np.array([0, 100, 100])
@@ -250,30 +263,50 @@ def start_camera_detection():
                 current_time = time.time()
                 if current_time - last_detection_time > 45:
                     print("No object detected for 45 seconds. Stopping program.")
-                    # Stop the conveyor motors before closing
                     motor_stop()
                     print("Conveyor stopped due to timeout.")
-                    time.sleep(1)  # Short delay to ensure command is processed
+                    time.sleep(1)
                     return
 
-            if dist <= 50:
-                #motor_stop()
-                print("Object too close! Motor stopped.")
-                last_detection_time = time.time()  # Reset timer on object detection
-                if not servo_started:
-                    print("Starting servo rotation...")
-                    servo_started = True
-                    scanning_complete = False
-                    Thread(target=rotate_servo_step_by_step).start()
-                    # No need to sleep here as the thread will handle timing
+            if dist <= 20:
+                motor_stop()
+                print("Object detected! Checking if it's a guyabano...")
+                last_detection_time = time.time()
+                rotate_servo_step_by_step()
+                # First check if it's a guyabano
+                is_guyabano = False
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                lower_red = np.array([0, 100, 100])
+                upper_red = np.array([10, 255, 255])
+                mask = cv2.inRange(hsv, lower_red, upper_red)
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                for contour in contours:
+                    area = cv2.contourArea(contour)
+                    if area > 100:
+                        is_guyabano = True
+                        break
+                
+                if is_guyabano:
+                    print("Guyabano detected! Starting scanning process...")
+                    if not servo_started:
+                        servo_started = True
+                        scanning_complete = False
+                        Thread(target=rotate_servo_step_by_step).start()
                     
-                # Let the thread complete its operation
-                if scanning_complete:
-                    scanning_complete = False
-                    print("Scan complete. Ready to continue.")
+                    if scanning_complete:
+                        scanning_complete = False
+                        print("Scan complete. Ready to continue.")
+                        motor_forward(speed=70)
+                        time.sleep(2)
+                        
+                else:
+                    print("No guyabano detected. Continuing conveyor...")
+                    motor_forward(speed=70)
+                    time.sleep(2)
             else:
                 motor_forward(speed=70)
-                detect_ripe_tomatoes(frame, model)
+                detect_guyabano(frame, model)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -290,10 +323,11 @@ def on_start():
 
 def on_reset():
     print("Resetting system...")
-    global servo_started, scanning_complete, last_detection_time
+    global servo_started, scanning_complete, last_detection_time, motor_running
     servo_started = False
     scanning_complete = False
     last_detection_time = None  # Reset the timeout counter
+    motor_running = False  # Reset motor state
     # Return servo to starting position
     set_angle(0)
     GPIO.output(relay_pin, GPIO.LOW)
@@ -309,12 +343,23 @@ def on_gui_close():
     GPIO.cleanup()
     main_root.destroy()
 
+def update_distance_label():
+    global distance_label
+    while True:
+        if distance_label is not None:
+            dist = get_distance()
+            distance_label.config(text=f"Distance: {dist:.1f} cm")
+        time.sleep(0.1)  # Update every 100ms
+
 # ------------------ MAIN GUI ------------------ #
 main_root = tk.Tk()
 main_root.title("Guyabano Detection System")
-main_root.geometry("300x250")
+main_root.geometry("300x300")
 
 tk.Label(main_root, text="Guyabano Detection", font=("Arial", 16)).pack(pady=20)
+
+distance_label = tk.Label(main_root, text="Distance: -- cm", font=("Arial", 14))
+distance_label.pack(pady=10)
 
 start_button = tk.Button(main_root, text="Start Process", font=("Arial", 14), command=on_start)
 start_button.pack(pady=10)
@@ -322,5 +367,10 @@ start_button.pack(pady=10)
 reset_button = tk.Button(main_root, text="Reset", font=("Arial", 14), command=on_reset)
 reset_button.pack(pady=10)
 
+# Start the distance update thread
+distance_thread = Thread(target=update_distance_label, daemon=True)
+distance_thread.start()
+
 main_root.protocol("WM_DELETE_WINDOW", on_gui_close)
 main_root.mainloop()
+
