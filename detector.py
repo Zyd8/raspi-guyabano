@@ -201,9 +201,10 @@ def show_result_gui(label, accuracy):
 def detect_guyabano(frame, model):
     global last_detection_time
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    lower_red = np.array([0, 100, 100])
-    upper_red = np.array([10, 255, 255])
-    mask = cv2.inRange(hsv, lower_red, upper_red)
+    # HSV range for green color detection
+    lower_green = np.array([35, 50, 50])
+    upper_green = np.array([85, 255, 255])
+    mask = cv2.inRange(hsv, lower_green, upper_green)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
