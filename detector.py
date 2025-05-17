@@ -31,6 +31,14 @@ relay_pin = 21  # Relay pin added
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
+# ------------------ SERVO CONTROL ------------------ #
+def set_angle(angle):
+    duty = angle / 18 + 2
+    pwm.ChangeDutyCycle(duty)
+    time.sleep(0.5)
+    pwm.ChangeDutyCycle(0)
+
+
 # Initialize servo and set to 0 degrees
 GPIO.setup(servo_pin, GPIO.OUT)
 pwm = GPIO.PWM(servo_pin, 50)  # 50Hz (20ms PWM period)
@@ -122,13 +130,6 @@ def motor_stop():
         print("Relay OFF")
         print("Motor stopped.")
         Thread(target=show_motor_stop_gui).start()
-
-# ------------------ SERVO CONTROL ------------------ #
-def set_angle(angle):
-    duty = angle / 18 + 2
-    pwm.ChangeDutyCycle(duty)
-    time.sleep(0.5)
-    pwm.ChangeDutyCycle(0)
 
 def rotate_servo_step_by_step():
     global servo_started, scanning_complete
