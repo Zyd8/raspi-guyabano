@@ -31,6 +31,13 @@ relay_pin = 21  # Relay pin added
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
+# Initialize servo and set to 0 degrees
+GPIO.setup(servo_pin, GPIO.OUT)
+pwm = GPIO.PWM(servo_pin, 50)  # 50Hz (20ms PWM period)
+pwm.start(0)  # Start with 0% duty cycle
+set_angle(0)  # Reset to 0 degrees on startup
+print("Servo reset to 0 degrees on startup")
+
 GPIO.setup(TRIG, GPIO.OUT)
 GPIO.setup(ECHO, GPIO.IN)
 
@@ -127,20 +134,80 @@ def rotate_servo_step_by_step():
     global servo_started, scanning_complete
 
     # Scan positions
-    angles = [0, 45, 90, 135, 180]
+    angles = [0, 45, 90, 135]
+    predictions = []
+    confidences = []
+    
     for angle in angles:
         set_angle(angle)
-        print(f"Stopped at {angle} degrees")
-        time.sleep(1)
+        print(f"Scanning at {angle} degrees")
+        time.sleep(1)  # Give time for the servo to settle
 
         # Capture image at each step and process it
         ret, frame = cap.read()
         if not ret:
-            print("Error: Couldn't capture image.")
+            print(f"Error: Couldn't capture image at {angle} degrees.")
             continue
-
-        print(f"Processing image at {angle} degrees...")
-        detect_guyabano(frame, model)
+            
+        # Process the frame and get prediction
+        if TENSORFLOW_AVAILABLE and model is not None:
+            try:
+                # Get the ROI (center 50% of the frame)
+                height, width = frame.shape[:2]
+                roi_size = 0.5
+                x1 = int(width * (1 - roi_size) / 2)
+                y1 = int(height * (1 - roi_size) / 2)
+                x2 = int(width * (1 + roi_size) / 2)
+                y2 = int(height * (1 + roi_size) / 2)
+                roi = frame[y1:y2, x1:x2]
+                
+                # Prepare ROI for prediction
+                roi = cv2.resize(roi, (224, 224))
+                roi = roi / 255.0
+                roi = np.expand_dims(roi, axis=0)
+                
+                # Make prediction
+                prediction = model.predict(roi)[0][0]
+                is_good_quality = prediction < 0.5
+                confidence = 1 - prediction if is_good_quality else prediction
+                
+                # Store predictions and confidences
+                predictions.append(is_good_quality)
+                confidences.append(confidence)
+                
+                print(f"Angle {angle}°: {'Good' if is_good_quality else 'Bad'} quality ({confidence*100:.1f}%)")
+                
+            except Exception as e:
+                print(f"Error during prediction at {angle}°: {e}")
+    
+    # After collecting all predictions, determine final quality
+    if predictions:
+        good_count = sum(predictions)
+        bad_count = len(predictions) - good_count
+        
+        # Calculate average confidence for the majority class
+        if good_count > bad_count:
+            final_quality = "Good"
+            avg_confidence = np.mean([conf for i, conf in enumerate(confidences) if predictions[i]])
+        elif bad_count > good_count:
+            final_quality = "Bad"
+            avg_confidence = np.mean([conf for i, conf in enumerate(confidences) if not predictions[i]])
+        else:  # tie
+            final_quality = "Good"  # Default to good in case of tie
+            avg_confidence = np.mean(confidences)
+        
+        print(f"\nFinal Quality Assessment:")
+        print(f"- Good quality views: {good_count}")
+        print(f"- Bad quality views: {bad_count}")
+        print(f"- Final Decision: {final_quality} quality ({avg_confidence*100:.1f}% confidence)")
+        
+        # Show the final result in the GUI
+        Thread(target=show_result_gui, args=(f"{final_quality} Quality", avg_confidence)).start()
+    else:
+        print("No valid predictions were made during the scan.")
+    
+    # Set scanning complete flag
+    scanning_complete = True
 
     # Wait 1 second after last rotation
     print("Servo finished rotating. Waiting 1 second before turning ON the relay.")
@@ -162,6 +229,11 @@ def rotate_servo_step_by_step():
     scanning_complete = True
     servo_started = False
     print("Servo returned to starting position. Ready for next scan.")
+    
+    # Add delay to prevent rescanning the same object
+    print("Waiting 3 seconds before allowing next scan...")
+    time.sleep(3)
+    print("Ready for next object.")
 
 # ------------------ LOAD MODEL ------------------ #
 if TENSORFLOW_AVAILABLE:
