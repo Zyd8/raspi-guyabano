@@ -268,7 +268,7 @@ def start_camera_detection():
                     time.sleep(1)
                     return
 
-            if dist <= 20:
+            if dist <= 36 or dist >= 140:
                 motor_stop()
                 print("Object detected! Checking if it's a guyabano...")
                 last_detection_time = time.time()
