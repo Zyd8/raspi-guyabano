@@ -47,7 +47,21 @@ motor_pwm.start(0)
 GPIO.setup(servo_pin, GPIO.OUT)
 pwm = GPIO.PWM(servo_pin, 50)  # 50Hz for servo
 pwm.start(0)
-set_angle = lambda angle: (pwm.ChangeDutyCycle(angle / 18 + 2), time.sleep(0.5), pwm.ChangeDutyCycle(0))
+
+def set_angle(angle, delay=0.5):
+    """Set servo angle with optional delay and turn off the signal to prevent jitter"""
+    duty = angle / 18 + 2
+    pwm.ChangeDutyCycle(duty)
+    time.sleep(delay)
+    pwm.ChangeDutyCycle(0)  # Turn off the signal to prevent jitter
+    
+# Servo movement parameters
+current_angle = 0  # Track current angle (0-180)
+scan_direction = 1  # 1 for increasing angle, -1 for decreasing
+SCAN_ANGLES = [0, 45, 90, 135, 180]  # Define scan positions
+
+# Initialize servo to 0 position
+set_angle(0, 1.0)  # Give extra time for initial positioning
 
 # ------------------ GLOBAL FLAGS ------------------ #
 program_running = False
@@ -92,14 +106,20 @@ def motor_stop():
         motor_running = False
 
 # ------------------ SERVO CONTROL ------------------ #
-def set_angle(angle):
+def set_angle(angle, delay=0.5):
+    """Set servo angle with optional delay and turn off the signal to prevent jitter"""
     duty = angle / 18 + 2
     pwm.ChangeDutyCycle(duty)
-    time.sleep(0.5)
-    pwm.ChangeDutyCycle(0)
+    time.sleep(delay)
+    pwm.ChangeDutyCycle(0)  # Turn off the signal to prevent jitter
 
 def rotate_servo_step_by_step():
-    global servo_started, scanning_complete, program_running, cap, model, motor_running
+    global servo_started, scanning_complete, program_running, cap, model, motor_running, current_angle, scan_direction
+    
+    # Initialize scan_direction if not set
+    if 'scan_direction' not in globals():
+        global scan_direction
+        scan_direction = 1  # Default to forward direction
     
     if not program_running:
         return
@@ -107,7 +127,16 @@ def rotate_servo_step_by_step():
     # Ensure motor is stopped before starting scan
     motor_stop()
     
-    angles = [0, 45, 90, 135, 0]
+    # Determine the next set of angles based on current direction
+    if scan_direction == 1:
+        angles = SCAN_ANGLES  # Forward scan: 0° to 180°
+    else:
+        angles = SCAN_ANGLES[::-1]  # Reverse scan: 180° to 0°
+    
+    # Skip the first angle if it's the same as current (except for 0°)
+    if angles[0] == current_angle and current_angle != 0:
+        angles = angles[1:]
+    
     predictions = []
     confidences = []
     
@@ -120,15 +149,19 @@ def rotate_servo_step_by_step():
             if status_label:
                 status_label.config(text=f"Status: Scanning at {angle}°...")
                 
-            # Move servo to position
-            set_angle(angle)
-            time.sleep(1)  # Give time for servo to stabilize
+            # Calculate movement parameters
+            angle_diff = abs(angle - current_angle)
+            move_delay = min(0.5 + (angle_diff * 0.005), 1.0)  # Slightly longer delay for larger moves
             
-            # Skip processing for the final 0° position (just returning home)
-            if angle == 0 and len(predictions) > 0:
-                time.sleep(0.5)  # Shorter delay for return to home
+            # Move servo to position with dynamic delay
+            set_angle(angle, move_delay)
+            current_angle = angle  # Update current angle
+            
+            # Skip processing for the first and last positions when just moving
+            if (angle == 0 or angle == 180) and len(predictions) > 0:
+                time.sleep(0.3)  # Shorter delay for end positions
                 continue
-            
+                
             # Capture frame
             ret, frame = cap.read()
             if not ret:
@@ -190,6 +223,9 @@ def rotate_servo_step_by_step():
                 print("Actuating relay for bad quality")
                 time.sleep(1)  # Keep relay on for 1 second
                 GPIO.output(relay_pin, GPIO.LOW)
+            
+# Toggle scan direction for next time
+            scan_direction *= -1
         else:
             if status_label:
                 status_label.config(text="Status: No valid predictions")
@@ -202,8 +238,13 @@ def rotate_servo_step_by_step():
     finally:
         # Always ensure we clean up properly
         try:
-            # Return to home position
-            set_angle(0)
+            # Ensure we're at 0 or 180 degrees based on direction (in case of early exit)
+            if scan_direction == 1:
+                set_angle(0, 1.0)  # Extra time for end positions
+                current_angle = 0
+            else:
+                set_angle(180, 1.0)
+                current_angle = 180
             
             # Ensure relay is off
             GPIO.output(relay_pin, GPIO.LOW)
