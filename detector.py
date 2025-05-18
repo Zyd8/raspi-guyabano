@@ -284,7 +284,7 @@ def rotate_servo_step_by_step():
             servo_started = False
             
             # Small delay before allowing next scan
-            time.sleep(5)
+            time.sleep(3)
             
             # Reset scanning state
             servo_started = False
@@ -376,22 +376,47 @@ def detect_guyabano(frame, model):
 # ------------------ VIDEO FEED UPDATE FOR TKINTER ------------------ #
 def check_inactivity():
     """Check if system has been inactive for too long and stop if needed"""
-    global program_running, last_detection_time, timeout_id
+    global program_running, last_detection_time, timeout_id, motor_running
     
     if not program_running:
         return
         
     current_time = time.time()
     if (current_time - last_detection_time) > INACTIVITY_TIMEOUT:
+        print(f"\n=== INACTIVITY TIMEOUT ({INACTIVITY_TIMEOUT}s) ===")
+        print(f"Current motor_running state: {motor_running}")
         
-        print(f"No objects detected for {INACTIVITY_TIMEOUT} seconds. Stopping...")
+        # Update the program state first
+        program_running = False
+        
+        # Stop the motor directly with force
+        try:
+            print("Force stopping motor...")
+            motor_pwm.ChangeDutyCycle(0)
+            GPIO.output(motor_in1, GPIO.LOW)
+            GPIO.output(motor_in2, GPIO.LOW)
+            GPIO.output(relay_pin, GPIO.HIGH)
+            motor_running = False
+            print("Motor force stopped")
+        except Exception as e:
+            print(f"Error during motor stop: {e}")
+        
+        # Call on_stop for cleanup
         on_stop()
-        motor_stop()
+        
+        # Update UI
         if status_label:
             status_label.config(text="Status: Inactive (press Start to resume)")
+            
+        print("=== INACTIVITY HANDLED ===\n")
     else:
         # Schedule the next check
         if 'root' in globals() and root is not None:
+            if timeout_id is not None:
+                try:
+                    root.after_cancel(timeout_id)
+                except:
+                    pass
             timeout_id = root.after(1000, check_inactivity)
 
 def update_video_feed():
@@ -693,10 +718,10 @@ if __name__ == "__main__":
         status_frame = ttk.Frame(main_frame, height=24, relief=tk.SUNKEN)
         status_frame.grid(row=2, column=0, sticky='ew', padx=2, pady=(0, 2))
         status_frame.grid_propagate(False)
-        distance_label = ttk.Label(status_frame, text="Distance: -- cm", padding=(5, 2))
+        distance_label = ttk.Label(status_frame, text="Distance: -- cm", padding=(5, 2), font=('TkDefaultFont', 14))
         distance_label.pack(side=tk.LEFT, fill=tk.Y)
         ttk.Separator(status_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
-        status_label = ttk.Label(status_frame, text="Status: Ready", padding=(5, 2))
+        status_label = ttk.Label(status_frame, text="Status: Ready", padding=(5, 2), font=('TkDefaultFont', 14))
         status_label.pack(side=tk.LEFT, fill=tk.Y)
         root.protocol("WM_DELETE_WINDOW", on_closing)
         window_width = root.winfo_screenwidth()
