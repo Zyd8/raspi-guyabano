@@ -58,7 +58,9 @@ def set_angle(angle, delay=0.5):
 # Servo movement parameters
 current_angle = 0  # Track current angle (0-180)
 scan_direction = 1  # 1 for increasing angle, -1 for decreasing
-SCAN_ANGLES = [0, 45, 90, 135, 180]  # Define scan positions
+# 5 scan positions for complete coverage with smooth motion:
+# 0° (start) -> 30° -> 90° -> 150° -> 0° (return to start)
+SCAN_ANGLES = [0, 30, 90, 150, 0]  # Complete scanning cycle
 
 # Initialize servo to 0 position
 set_angle(0, 1.0)  # Give extra time for initial positioning
@@ -659,7 +661,9 @@ if __name__ == "__main__":
             print("Error: Could not open camera")
             sys.exit(1)
         root = tk.Tk()
-        root.title("Guyabano Detection System")
+        root.title("Guyabano Quality Detector")
+        root.attributes('-fullscreen', True)
+        root.bind('<Escape>', lambda e: root.attributes('-fullscreen', False))  # Press ESC to exit fullscreen
         screen_width = root.winfo_screenwidth()
         screen_height = root.winfo_screenheight()
         window_width = min(800, int(screen_width * 0.9))
@@ -695,9 +699,11 @@ if __name__ == "__main__":
         status_label = ttk.Label(status_frame, text="Status: Ready", padding=(5, 2))
         status_label.pack(side=tk.LEFT, fill=tk.Y)
         root.protocol("WM_DELETE_WINDOW", on_closing)
+        window_width = root.winfo_screenwidth()
+        window_height = root.winfo_screenheight()
+        root.geometry(f"{window_width}x{window_height}+0+0")
         root.mainloop()
     except Exception as e:
         print(f"Error: {e}")
     finally:
         cleanup()
-
