@@ -68,14 +68,16 @@ program_running = False
 servo_started = False
 scanning_complete = False
 gui_open = False
-last_detection_time = None
+last_detection_time = time.time()  # Track last time an object was detected
 motor_running = False
 cap = None
 model = None
 gui_lock = Lock()
 last_scan_time = 0  # Timestamp of last scan completion
 SCAN_COOLDOWN = 5  # Cooldown period in seconds
+INACTIVITY_TIMEOUT = 45  # Stop after 45 seconds of no detections
 result_text = ""  # Store the latest quality result
+timeout_id = None  # For tracking the inactivity timeout
 
 # GUI elements
 root = None
@@ -89,21 +91,43 @@ reset_button = None
 # ------------------ MOTOR CONTROL ------------------ #
 def motor_forward(speed=50):
     global motor_running
+    print(f"Attempting to start motor at speed {speed}...")
     if not motor_running:
-        GPIO.output(motor_in1, GPIO.HIGH)
-        GPIO.output(motor_in2, GPIO.LOW)
-        motor_pwm.ChangeDutyCycle(speed)
-        GPIO.output(relay_pin, GPIO.LOW)
-        motor_running = True
+        try:
+            # First ensure relay is on (LOW activates the relay)
+            GPIO.output(relay_pin, GPIO.LOW)
+            time.sleep(0.1)  # Small delay for relay
+            
+            # Set motor direction
+            GPIO.output(motor_in1, GPIO.HIGH)
+            GPIO.output(motor_in2, GPIO.LOW)
+            
+            # Start PWM
+            motor_pwm.start(0)  # Initialize PWM if not already started
+            motor_pwm.ChangeDutyCycle(speed)
+            
+            motor_running = True
+            print(f"Motor started successfully at speed {speed}")
+        except Exception as e:
+            print(f"Error starting motor: {e}")
 
 def motor_stop():
     global motor_running
+    print("Attempting to stop motor...")
     if motor_running:
-        GPIO.output(motor_in1, GPIO.LOW)
-        GPIO.output(motor_in2, GPIO.LOW)
-        motor_pwm.ChangeDutyCycle(0)
-        GPIO.output(relay_pin, GPIO.HIGH)
-        motor_running = False
+        try:
+            print("Stopping motor...")
+            # First stop the PWM
+            motor_pwm.ChangeDutyCycle(0)
+            # Then set both motor pins to LOW (brake)
+            GPIO.output(motor_in1, GPIO.LOW)
+            GPIO.output(motor_in2, GPIO.LOW)
+            # Turn off the relay
+            GPIO.output(relay_pin, GPIO.HIGH)
+            motor_running = False
+            print("Motor stopped successfully")
+        except Exception as e:
+            print(f"Error stopping motor: {e}")
 
 # ------------------ SERVO CONTROL ------------------ #
 def set_angle(angle, delay=0.5):
@@ -348,10 +372,52 @@ def detect_guyabano(frame, model):
     return processed_frame
 
 # ------------------ VIDEO FEED UPDATE FOR TKINTER ------------------ #
+def check_inactivity():
+    """Check if system has been inactive for too long and stop if needed"""
+    global program_running, last_detection_time, timeout_id
+    
+    if not program_running:
+        return
+        
+    current_time = time.time()
+    if (current_time - last_detection_time) > INACTIVITY_TIMEOUT:
+        
+        print(f"No objects detected for {INACTIVITY_TIMEOUT} seconds. Stopping...")
+        on_stop()
+        motor_stop()
+        if status_label:
+            status_label.config(text="Status: Inactive (press Start to resume)")
+    else:
+        # Schedule the next check
+        if 'root' in globals() and root is not None:
+            timeout_id = root.after(1000, check_inactivity)
+
 def update_video_feed():
-    global program_running, video_label, cap, distance_label, status_label, servo_started, scanning_complete, last_detection_time, motor_running, last_scan_time
+    global program_running, video_label, cap, distance_label, status_label, \
+           servo_started, scanning_complete, last_detection_time, motor_running, \
+           last_scan_time, timeout_id
+           
     if program_running and cap is not None and cap.isOpened():
         dist = get_distance()
+        current_time = time.time()
+        
+        # Update last detection time if we see an object
+        if dist is not None and (dist <= 36 or dist >= 140):
+            last_detection_time = current_time
+            # Cancel any pending timeout since we just detected an object
+            if timeout_id is not None and 'root' in globals() and root is not None:
+                root.after_cancel(timeout_id)
+                timeout_id = None
+        
+        # Check for inactivity timeout
+        if (current_time - last_detection_time) > INACTIVITY_TIMEOUT and motor_running:
+            check_inactivity()
+        # Schedule the next timeout check
+        elif program_running and 'root' in globals() and root is not None:
+            if timeout_id is not None:
+                root.after_cancel(timeout_id)
+            timeout_id = root.after(1000, check_inactivity)
+            
         if distance_label:
             distance_label.config(text=f"Distance: {dist if dist is not None else '--'} cm")
         
@@ -487,6 +553,76 @@ def on_reset():
     dist = get_distance()
     if dist is not None and (dist > 36 and dist < 140):
         motor_forward(speed=70)
+
+def on_stop():
+    """Stop the system and clean up resources"""
+    global program_running, servo_started, scanning_complete, last_detection_time, motor_running, timeout_id
+    
+    print("\n=== STOPPING SYSTEM ===")
+    program_running = False
+    servo_started = False
+    scanning_complete = False
+    
+    # Cancel any pending timeout
+    if 'root' in globals() and root is not None and timeout_id is not None:
+        try:
+            root.after_cancel(timeout_id)
+            timeout_id = None
+            print("Cancelled pending timeout")
+        except Exception as e:
+            print(f"Error cancelling timeout: {e}")
+    
+    # Stop all moving parts
+    print("Stopping motor...")
+    motor_stop()
+    
+    print("Returning servo to home position...")
+    set_angle(0)  # Return servo to home position
+    
+    # Ensure relay is off
+    GPIO.output(relay_pin, GPIO.HIGH)
+    print("Relay turned off")
+    
+    # Small delay to ensure everything has time to stop
+    time.sleep(0.5)
+    
+    # Update UI
+    if start_button and stop_button and status_label:
+        start_button.config(state=tk.NORMAL)
+        stop_button.config(state=tk.DISABLED)
+        status_label.config(text="Status: Stopped")
+    
+    print("=== SYSTEM STOPPED ===\n")
+
+def on_start():
+    """Start the system and initialize necessary components"""
+    global program_running, servo_started, scanning_complete, last_detection_time, motor_running, last_scan_time, timeout_id
+    
+    # Reset timers and states
+    last_detection_time = time.time()
+    program_running = True
+    servo_started = False
+    scanning_complete = False
+    last_scan_time = 0
+    
+    # Cancel any existing timeout
+    if 'root' in globals() and root is not None and timeout_id is not None:
+        root.after_cancel(timeout_id)
+    
+    # Update UI
+    if start_button and stop_button and status_label:
+        start_button.config(state=tk.DISABLED)
+        stop_button.config(state=tk.NORMAL)
+        status_label.config(text="Status: Started - Waiting for object...")
+    
+    # Start motor if no object is detected
+    dist = get_distance()
+    if dist is not None and (dist > 36 and dist < 140):
+        motor_forward(speed=70)
+    
+    # Start the inactivity checker
+    if 'root' in globals() and root is not None:
+        timeout_id = root.after(1000, check_inactivity)
 
 def cleanup():
     global program_running, cap
