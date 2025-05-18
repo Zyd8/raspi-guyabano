@@ -210,6 +210,10 @@ def rotate_servo_step_by_step():
             # Small delay before allowing next scan
             time.sleep(1)
             
+            # Reset scanning state
+            servo_started = False
+            scanning_complete = False
+            
             # Update status and set last scan time
             last_scan_time = time.time()
             if status_label:
@@ -220,6 +224,10 @@ def rotate_servo_step_by_step():
                 def update_status_after_cooldown():
                     if status_label:
                         status_label.config(text="Status: Ready")
+                    # Ensure motor starts moving again after cooldown if no object is detected
+                    dist = get_distance()
+                    if dist is not None and (dist > 36 and dist < 140):
+                        motor_forward(speed=70)
                 root.after(SCAN_COOLDOWN * 1000, update_status_after_cooldown)
                 
         except Exception as e:
@@ -289,10 +297,17 @@ def update_video_feed():
             frame = cv2.resize(frame, (640, 480))
             display_frame = frame.copy()
             
-            # Only process motor control if we're not in the middle of a scan or in cooldown
+            # Check if we should process new object detection
             current_time = time.time()
-            if not servo_started and not scanning_complete and (current_time - last_scan_time > SCAN_COOLDOWN):
-                if dist is not None and (dist <= 36 or dist >= 140):
+            cooldown_elapsed = (current_time - last_scan_time) > SCAN_COOLDOWN
+            
+            # Only process if not in the middle of a scan and cooldown has elapsed
+            if not servo_started and not scanning_complete and cooldown_elapsed:
+                # If no object detected and motor isn't running, start the motor
+                if dist is not None and (dist > 36 and dist < 140) and not motor_running:
+                    motor_forward(speed=70)
+                # If object detected, stop and process it
+                elif dist is not None and (dist <= 36 or dist >= 140):
                     motor_stop()
                     status_label.config(text="Status: Object detected - Checking...")
                     last_detection_time = time.time()
@@ -352,17 +367,22 @@ def stop_detection():
     motor_stop()
 
 def on_reset():
-    global servo_started, scanning_complete, last_detection_time, motor_running
+    global servo_started, scanning_complete, last_detection_time, motor_running, last_scan_time
     servo_started = False
     scanning_complete = False
     last_detection_time = None
-    motor_running = False
+    last_scan_time = 0  # Reset cooldown timer
+    motor_stop()
     set_angle(0)
     GPIO.output(relay_pin, GPIO.LOW)
     if start_button and stop_button and status_label:
         start_button.config(state=tk.NORMAL)
         stop_button.config(state=tk.DISABLED)
         status_label.config(text="Status: Ready")
+    # Ensure motor starts moving if no object is detected
+    dist = get_distance()
+    if dist is not None and (dist > 36 and dist < 140):
+        motor_forward(speed=70)
 
 def cleanup():
     global program_running, cap
