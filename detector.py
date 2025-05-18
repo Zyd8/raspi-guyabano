@@ -39,25 +39,23 @@ def set_angle(angle):
     pwm.ChangeDutyCycle(0)
 
 
-# Initialize servo and set to 0 degrees
-GPIO.setup(servo_pin, GPIO.OUT)
-pwm = GPIO.PWM(servo_pin, 50)  # 50Hz (20ms PWM period)
-pwm.start(0)  # Start with 0% duty cycle
-set_angle(0)  # Reset to 0 degrees on startup
-print("Servo reset to 0 degrees on startup")
-
+# Initialize GPIO pins
 GPIO.setup(TRIG, GPIO.OUT)
 GPIO.setup(ECHO, GPIO.IN)
-
-GPIO.setup(servo_pin, GPIO.OUT)
-pwm = GPIO.PWM(servo_pin, 50)  # 50Hz
-pwm.start(0)
-
 GPIO.setup(motor_in1, GPIO.OUT)
 GPIO.setup(motor_in2, GPIO.OUT)
 GPIO.setup(motor_en, GPIO.OUT)
-motor_pwm = GPIO.PWM(motor_en, 100)
+
+# Initialize PWM for motor
+motor_pwm = GPIO.PWM(motor_en, 100)  # 100Hz for motor
 motor_pwm.start(0)
+
+# Initialize servo
+GPIO.setup(servo_pin, GPIO.OUT)
+pwm = GPIO.PWM(servo_pin, 50)  # 50Hz (20ms) for servo
+pwm.start(0)
+set_angle(0)  # Reset to 0 degrees on startup
+print("Servo and motor PWM initialized")
 
 GPIO.setup(relay_pin, GPIO.OUT)  # Relay setup
 GPIO.output(relay_pin, GPIO.HIGH)  # Initial state: OFF (adjust if needed)
@@ -74,19 +72,37 @@ program_running = True  # Track if program is running
 
 # ------------------ DISTANCE MEASUREMENT ------------------ #
 def get_distance():
-    GPIO.output(TRIG, True)
-    time.sleep(0.00001)
-    GPIO.output(TRIG, False)
-
-    while GPIO.input(ECHO) == 0:
-        pulse_start = time.time()
-
-    while GPIO.input(ECHO) == 1:
-        pulse_end = time.time()
-
-    pulse_duration = pulse_end - pulse_start
-    distance = pulse_duration * 34300 / 2
-    return round(distance, 2)
+    # Initialize variables
+    pulse_start = time.time()
+    pulse_end = time.time()
+    timeout = 0.1  # 100ms timeout
+    
+    try:
+        # Send 10us pulse to trigger
+        GPIO.output(TRIG, True)
+        time.sleep(0.00001)  # 10 microseconds
+        GPIO.output(TRIG, False)
+        
+        # Wait for echo to go high (start of pulse)
+        start_time = time.time()
+        while GPIO.input(ECHO) == 0 and (time.time() - start_time) < timeout:
+            pulse_start = time.time()
+            
+        # Wait for echo to go low (end of pulse)
+        start_time = time.time()
+        while GPIO.input(ECHO) == 1 and (time.time() - start_time) < timeout:
+            pulse_end = time.time()
+            
+        # Calculate distance in centimeters
+        pulse_duration = pulse_end - pulse_start
+        distance = (pulse_duration * 34300) / 2  # Speed of sound is 343m/s = 34300 cm/s
+        
+        # Return distance rounded to 2 decimal places, or None if timeout
+        return round(distance, 2) if distance > 0 else None
+        
+    except Exception as e:
+        print(f"Error in distance measurement: {e}")
+        return None
 
 # ------------------ MOTOR CONTROL ------------------ #
 def motor_forward(speed=50):
@@ -334,15 +350,40 @@ def cleanup():
     global program_running
     program_running = False
     print("Cleaning up resources...")
-    # Stop the motor
-    motor_stop()
-    # Stop the servo
-    pwm.ChangeDutyCycle(0)
-    # Release camera
-    cap.release()
-    # Clean up GPIO
-    GPIO.cleanup()
-    print("Cleanup complete.")
+    
+    try:
+        # Stop the motor
+        motor_stop()
+        
+        # Stop PWM signals
+        if 'pwm' in globals():
+            pwm.ChangeDutyCycle(0)
+            pwm.stop()
+            
+        if 'motor_pwm' in globals():
+            motor_pwm.ChangeDutyCycle(0)
+            motor_pwm.stop()
+            
+        # Release camera if it's open
+        if 'cap' in globals() and cap.isOpened():
+            cap.release()
+            
+        # Clean up GPIO
+        GPIO.cleanup()
+        print("Cleanup complete.")
+        
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+    finally:
+        # Ensure GPIO cleanup happens even if there's an error
+        try:
+            if 'pwm' in globals():
+                pwm.stop()
+            if 'motor_pwm' in globals():
+                motor_pwm.stop()
+            GPIO.cleanup()
+        except:
+            pass
 
 # ------------------ DETECTION PROCESS ------------------ #
 def start_camera_detection():
