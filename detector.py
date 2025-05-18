@@ -61,6 +61,7 @@ model = None
 gui_lock = Lock()
 last_scan_time = 0  # Timestamp of last scan completion
 SCAN_COOLDOWN = 5  # Cooldown period in seconds
+result_text = ""  # Store the latest quality result
 
 # GUI elements
 root = None
@@ -179,9 +180,8 @@ def rotate_servo_step_by_step():
                 final_quality = "Good"  # Default to good in case of tie
                 avg_confidence = np.mean(confidences)
             
+            global result_text
             result_text = f"{final_quality} Quality ({avg_confidence*100:.1f}%)"
-            if status_label:
-                status_label.config(text=f"Status: {result_text}")
             print(f"Final quality assessment: {result_text}")
             
             # Actuate relay based on quality (example: activate for bad quality)
@@ -213,27 +213,40 @@ def rotate_servo_step_by_step():
             servo_started = False
             
             # Small delay before allowing next scan
-            time.sleep(1)
+            time.sleep(5)
             
             # Reset scanning state
             servo_started = False
             scanning_complete = False
             
-            # Update status and set last scan time
+            # Update status with quality result and set last scan time
             last_scan_time = time.time()
-            if status_label:
-                status_label.config(text=f"Status: Ready (cooldown for {SCAN_COOLDOWN}s)")
             
-            # Schedule status update after cooldown
-            if 'root' in globals() and root is not None:
-                def update_status_after_cooldown():
-                    if status_label:
-                        status_label.config(text="Status: Ready")
-                    # Ensure motor starts moving again after cooldown if no object is detected
-                    dist = get_distance()
-                    if dist is not None and (dist > 36 and dist < 140):
-                        motor_forward(speed=70)
-                root.after(SCAN_COOLDOWN * 1000, update_status_after_cooldown)
+            # Keep the quality result visible for longer
+            QUALITY_DISPLAY_TIME = 5  # Show quality result for 5 seconds
+            READY_DELAY = 2  # Additional delay before showing "Ready"
+            
+            if status_label:
+                # First show the quality result
+                status_label.config(text=f"Status: {result_text} (cooldown for {SCAN_COOLDOWN}s)")
+                
+                # After QUALITY_DISPLAY_TIME, show "Ready" status
+                if 'root' in globals() and root is not None:
+                    def show_ready_status():
+                        if status_label:
+                            status_label.config(text=f"Status: Ready (cooldown for {SCAN_COOLDOWN}s)")
+                    
+                    # After SCAN_COOLDOWN + READY_DELAY, show "Ready" and start motor if needed
+                    def final_ready():
+                        if status_label:
+                            status_label.config(text="Status: Ready")
+                        dist = get_distance()
+                        if dist is not None and (dist > 36 and dist < 140):
+                            motor_forward(speed=70)
+                    
+                    # Schedule the status updates
+                    root.after(QUALITY_DISPLAY_TIME * 1000, show_ready_status)
+                    root.after((SCAN_COOLDOWN + READY_DELAY) * 1000, final_ready)
                 
         except Exception as e:
             print(f"Error during cleanup: {e}")
