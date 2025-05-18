@@ -106,7 +106,7 @@ def rotate_servo_step_by_step():
     # Ensure motor is stopped before starting scan
     motor_stop()
     
-    angles = [0, 45, 90, 135]
+    angles = [0, 45, 90, 135, 0]
     predictions = []
     confidences = []
     
@@ -122,6 +122,11 @@ def rotate_servo_step_by_step():
             # Move servo to position
             set_angle(angle)
             time.sleep(1)  # Give time for servo to stabilize
+            
+            # Skip processing for the final 0° position (just returning home)
+            if angle == 0 and len(predictions) > 0:
+                time.sleep(0.5)  # Shorter delay for return to home
+                continue
             
             # Capture frame
             ret, frame = cap.read()
