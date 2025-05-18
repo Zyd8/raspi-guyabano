@@ -200,18 +200,22 @@ def rotate_servo_step_by_step():
         
         # Process results if we have any predictions
         if predictions:
-            good_count = sum(predictions)
-            bad_count = len(predictions) - good_count
+            # Default to Good quality
+            final_quality = "Good"
             
-            if good_count > bad_count:
-                final_quality = "Good"
-                avg_confidence = np.mean([conf for i, conf in enumerate(confidences) if predictions[i]])
-            elif bad_count > good_count:
-                final_quality = "Bad"
-                avg_confidence = np.mean([conf for i, conf in enumerate(confidences) if not predictions[i]])
+            # Calculate average confidence for good predictions
+            good_confidences = [conf for i, conf in enumerate(confidences) if predictions[i]]
+            if good_confidences:  # If we have any good predictions
+                avg_confidence = np.mean(good_confidences)
             else:
-                final_quality = "Good"  # Default to good in case of tie
-                avg_confidence = np.mean(confidences)
+                avg_confidence = 0.8  # Default confidence if no good predictions (shouldn't happen with default logic)
+            
+            # Check if any scan detected bad quality
+            if any(not pred for pred in predictions):
+                final_quality = "Bad"
+                # Use the worst (lowest) confidence for bad quality
+                avg_confidence = min(confidences)
+                print(f"Bad quality detected in at least one scan. Confidence: {avg_confidence*100:.1f}%")
             
             global result_text
             result_text = f"{final_quality} Quality ({avg_confidence*100:.1f}%)"
