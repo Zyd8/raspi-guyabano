@@ -391,7 +391,7 @@ def start_camera_detection():
     try:
         while program_running:
             dist = get_distance()
-            print(f"Distance: {dist} cm")
+ 
             ret, frame = cap.read()
             if not ret:
                 print("Error: Couldn't read frame")
