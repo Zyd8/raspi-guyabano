@@ -307,18 +307,59 @@ def update_video_feed():
                 if dist is not None and (dist > 36 and dist < 140) and not motor_running:
                     motor_forward(speed=70)
                 # If object detected, stop and process it
-                elif dist is not None and (dist <= 36 or dist >= 140):
+                elif dist is not None and (dist <= 36 or dist >= 140) and not servo_started:
                     motor_stop()
                     status_label.config(text="Status: Object detected - Checking...")
                     last_detection_time = time.time()
                     
-                    # Check if it's a guyabano using color detection
-                    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                    lower_red = np.array([0, 100, 100])
-                    upper_red = np.array([10, 255, 255])
-                    mask = cv2.inRange(hsv, lower_red, upper_red)
-                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    is_guyabano = any(cv2.contourArea(c) > 100 for c in contours)
+                    # Check if it's a guyabano using color detection with more lenient thresholds
+                    time.sleep(0.5)  # Give the camera a moment to stabilize
+                    
+                    # Get a fresh frame
+                    ret, frame = cap.read()
+                    if ret:
+                        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                        
+                        # Define a wider range of green colors (adjust these values as needed)
+                        # Lower bound (darker green)
+                        lower_green1 = np.array([30, 40, 40])  # More lenient hue range
+                        upper_green1 = np.array([90, 255, 255])
+                        
+                        # Upper bound (lighter green/yellow)
+                        lower_green2 = np.array([20, 30, 30])
+                        upper_green2 = np.array([100, 255, 255])
+                        
+                        # Create masks for both ranges and combine them
+                        mask1 = cv2.inRange(hsv, lower_green1, upper_green1)
+                        mask2 = cv2.inRange(hsv, lower_green2, upper_green2)
+                        mask = cv2.bitwise_or(mask1, mask2)
+                        
+                        # Apply some morphological operations to clean up the mask
+                        kernel = np.ones((5,5), np.uint8)
+                        mask = cv2.erode(mask, kernel, iterations=1)
+                        mask = cv2.dilate(mask, kernel, iterations=2)
+                        
+                        # Debug: Show the mask (uncomment for debugging)
+                        # cv2.imshow('Color Mask', mask)
+                        # cv2.waitKey(1)
+                        
+                        # Find contours
+                        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        
+                        # Be more lenient with contour area and aspect ratio
+                        is_guyabano = False
+                        for c in contours:
+                            area = cv2.contourArea(c)
+                            if area > 30:  # Very lenient area threshold
+                                x, y, w, h = cv2.boundingRect(c)
+                                aspect_ratio = float(w)/h if h > 0 else 0
+                                # Accept a very wide range of aspect ratios
+                                if 0.2 < aspect_ratio < 5.0:
+                                    is_guyabano = True
+                                    break
+                    else:
+                        # If we couldn't get a frame, assume it's not a guyabano to keep things moving
+                        is_guyabano = False
                     
                     if is_guyabano:
                         status_label.config(text="Status: Guyabano detected - Analyzing quality...")
