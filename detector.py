@@ -3,6 +3,8 @@ import numpy as np
 import time
 import RPi.GPIO as GPIO
 import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk
 import sys
 import os
 
@@ -26,83 +28,48 @@ servo_pin = 18
 motor_in1 = 23
 motor_in2 = 24
 motor_en = 25
-relay_pin = 21  # Relay pin added
+relay_pin = 21
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
-
-# ------------------ SERVO CONTROL ------------------ #
-def set_angle(angle):
-    duty = angle / 18 + 2
-    pwm.ChangeDutyCycle(duty)
-    time.sleep(0.5)
-    pwm.ChangeDutyCycle(0)
-
-
-# Initialize GPIO pins
 GPIO.setup(TRIG, GPIO.OUT)
 GPIO.setup(ECHO, GPIO.IN)
 GPIO.setup(motor_in1, GPIO.OUT)
 GPIO.setup(motor_in2, GPIO.OUT)
 GPIO.setup(motor_en, GPIO.OUT)
-
-# Initialize PWM for motor
-motor_pwm = GPIO.PWM(motor_en, 100)  # 100Hz for motor
+GPIO.setup(relay_pin, GPIO.OUT)
+GPIO.output(relay_pin, GPIO.HIGH)
+# Initialize PWM for motor speed control
+motor_pwm = GPIO.PWM(motor_en, 100)
 motor_pwm.start(0)
 
 # Initialize servo
 GPIO.setup(servo_pin, GPIO.OUT)
-pwm = GPIO.PWM(servo_pin, 50)  # 50Hz (20ms) for servo
+pwm = GPIO.PWM(servo_pin, 50)  # 50Hz for servo
 pwm.start(0)
-set_angle(0)  # Reset to 0 degrees on startup
-print("Servo and motor PWM initialized")
-
-GPIO.setup(relay_pin, GPIO.OUT)  # Relay setup
-GPIO.output(relay_pin, GPIO.HIGH)  # Initial state: OFF (adjust if needed)
+set_angle = lambda angle: (pwm.ChangeDutyCycle(angle / 18 + 2), time.sleep(0.5), pwm.ChangeDutyCycle(0))
 
 # ------------------ GLOBAL FLAGS ------------------ #
-gui_open = False
+program_running = False
 servo_started = False
 scanning_complete = False
+gui_open = False
+last_detection_time = None
+motor_running = False
+cap = None
+model = None
 gui_lock = Lock()
-last_detection_time = None  # Will be initialized when start button is clicked
-distance_label = None  # Will hold reference to the distance label
-motor_running = False  # Track motor state
-program_running = True  # Track if program is running
+last_scan_time = 0  # Timestamp of last scan completion
+SCAN_COOLDOWN = 5  # Cooldown period in seconds
 
-# ------------------ DISTANCE MEASUREMENT ------------------ #
-def get_distance():
-    # Initialize variables
-    pulse_start = time.time()
-    pulse_end = time.time()
-    timeout = 0.1  # 100ms timeout
-    
-    try:
-        # Send 10us pulse to trigger
-        GPIO.output(TRIG, True)
-        time.sleep(0.00001)  # 10 microseconds
-        GPIO.output(TRIG, False)
-        
-        # Wait for echo to go high (start of pulse)
-        start_time = time.time()
-        while GPIO.input(ECHO) == 0 and (time.time() - start_time) < timeout:
-            pulse_start = time.time()
-            
-        # Wait for echo to go low (end of pulse)
-        start_time = time.time()
-        while GPIO.input(ECHO) == 1 and (time.time() - start_time) < timeout:
-            pulse_end = time.time()
-            
-        # Calculate distance in centimeters
-        pulse_duration = pulse_end - pulse_start
-        distance = (pulse_duration * 34300) / 2  # Speed of sound is 343m/s = 34300 cm/s
-        
-        # Return distance rounded to 2 decimal places, or None if timeout
-        return round(distance, 2) if distance > 0 else None
-        
-    except Exception as e:
-        print(f"Error in distance measurement: {e}")
-        return None
+# GUI elements
+root = None
+video_label = None
+distance_label = None
+status_label = None
+start_button = None
+stop_button = None
+reset_button = None
 
 # ------------------ MOTOR CONTROL ------------------ #
 def motor_forward(speed=50):
@@ -113,27 +80,6 @@ def motor_forward(speed=50):
         motor_pwm.ChangeDutyCycle(speed)
         GPIO.output(relay_pin, GPIO.LOW)
         motor_running = True
-        print("Motor moving forward.")
-
-def show_motor_stop_gui():
-    global gui_open
-    with gui_lock:
-        if gui_open:
-            return
-        gui_open = True
-
-    def on_close():
-        global gui_open
-        with gui_lock:
-            gui_open = False
-        stop_root.destroy()
-
-    stop_root = tk.Tk()
-    stop_root.title("Conveyor Status")
-    tk.Label(stop_root, text="Conveyor has stopped", font=("Arial", 16)).pack(pady=10)
-    tk.Button(stop_root, text="OK", command=on_close, font=("Arial", 12)).pack(pady=10)
-    stop_root.protocol("WM_DELETE_WINDOW", on_close)
-    stop_root.mainloop()
 
 def motor_stop():
     global motor_running
@@ -143,386 +89,355 @@ def motor_stop():
         motor_pwm.ChangeDutyCycle(0)
         GPIO.output(relay_pin, GPIO.HIGH)
         motor_running = False
-        print("Relay OFF")
-        print("Motor stopped.")
-        Thread(target=show_motor_stop_gui).start()
+
+# ------------------ SERVO CONTROL ------------------ #
+def set_angle(angle):
+    duty = angle / 18 + 2
+    pwm.ChangeDutyCycle(duty)
+    time.sleep(0.5)
+    pwm.ChangeDutyCycle(0)
 
 def rotate_servo_step_by_step():
-    global servo_started, scanning_complete
-
-    # Scan positions
+    global servo_started, scanning_complete, program_running, cap, model, motor_running
+    
+    if not program_running:
+        return
+        
+    # Ensure motor is stopped before starting scan
+    motor_stop()
+    
     angles = [0, 45, 90, 135]
     predictions = []
     confidences = []
     
-    for angle in angles:
-        set_angle(angle)
-        print(f"Scanning at {angle} degrees")
-        time.sleep(1)  # Give time for the servo to settle
-
-        # Capture image at each step and process it
-        ret, frame = cap.read()
-        if not ret:
-            print(f"Error: Couldn't capture image at {angle} degrees.")
-            continue
-            
-        # Process the frame and get prediction
-        if TENSORFLOW_AVAILABLE and model is not None:
-            try:
-                # Get the ROI (center 50% of the frame)
-                height, width = frame.shape[:2]
-                roi_size = 0.5
-                x1 = int(width * (1 - roi_size) / 2)
-                y1 = int(height * (1 - roi_size) / 2)
-                x2 = int(width * (1 + roi_size) / 2)
-                y2 = int(height * (1 + roi_size) / 2)
-                roi = frame[y1:y2, x1:x2]
-                
-                # Prepare ROI for prediction
-                roi = cv2.resize(roi, (224, 224))
-                roi = roi / 255.0
-                roi = np.expand_dims(roi, axis=0)
-                
-                # Make prediction
-                prediction = model.predict(roi)[0][0]
-                is_good_quality = prediction < 0.5
-                confidence = 1 - prediction if is_good_quality else prediction
-                
-                # Store predictions and confidences
-                predictions.append(is_good_quality)
-                confidences.append(confidence)
-                
-                print(f"Angle {angle}°: {'Good' if is_good_quality else 'Bad'} quality ({confidence*100:.1f}%)")
-                
-            except Exception as e:
-                print(f"Error during prediction at {angle}°: {e}")
-    
-    # After collecting all predictions, determine final quality
-    if predictions:
-        good_count = sum(predictions)
-        bad_count = len(predictions) - good_count
-        
-        # Calculate average confidence for the majority class
-        if good_count > bad_count:
-            final_quality = "Good"
-            avg_confidence = np.mean([conf for i, conf in enumerate(confidences) if predictions[i]])
-        elif bad_count > good_count:
-            final_quality = "Bad"
-            avg_confidence = np.mean([conf for i, conf in enumerate(confidences) if not predictions[i]])
-        else:  # tie
-            final_quality = "Good"  # Default to good in case of tie
-            avg_confidence = np.mean(confidences)
-        
-        print(f"\nFinal Quality Assessment:")
-        print(f"- Good quality views: {good_count}")
-        print(f"- Bad quality views: {bad_count}")
-        print(f"- Final Decision: {final_quality} quality ({avg_confidence*100:.1f}% confidence)")
-        
-        # Show the final result in the GUI
-        Thread(target=show_result_gui, args=(f"{final_quality} Quality", avg_confidence)).start()
-    else:
-        print("No valid predictions were made during the scan.")
-    
-    # Set scanning complete flag
-    scanning_complete = True
-
-    # Wait 1 second after last rotation
-    print("Servo finished rotating. Waiting 1 second before turning ON the relay.")
-    time.sleep(1)
-
-    # Turn ON the relay
-    GPIO.output(relay_pin, GPIO.HIGH)
-    print("Relay ON")
-
-    # Return to starting position (0 degrees)
-    print("Returning to starting position...")
-    set_angle(0)
-
-    # Turn relay back off
-    GPIO.output(relay_pin, GPIO.LOW)
-    print("Relay OFF")
-
-    # Indicate that scanning is complete and reset servo flag
-    scanning_complete = True
-    servo_started = False
-    print("Servo returned to starting position. Ready for next scan.")
-    
-    # Add delay to prevent rescanning the same object
-    print("Waiting 3 seconds before allowing next scan...")
-    time.sleep(3)
-    print("Ready for next object.")
-
-# ------------------ LOAD MODEL ------------------ #
-if TENSORFLOW_AVAILABLE:
     try:
-        model = load_model('model.h5')
-        print("Model loaded successfully")
+        for angle in angles:
+            if not program_running:
+                break
+                
+            # Update status
+            if status_label:
+                status_label.config(text=f"Status: Scanning at {angle}°...")
+                
+            # Move servo to position
+            set_angle(angle)
+            time.sleep(1)  # Give time for servo to stabilize
+            
+            # Capture frame
+            ret, frame = cap.read()
+            if not ret:
+                continue
+                
+            # Process frame if model is available
+            if TENSORFLOW_AVAILABLE and model is not None:
+                try:
+                    # Get center ROI of the frame
+                    height, width = frame.shape[:2]
+                    roi_size = 0.5
+                    x1 = int(width * (1 - roi_size) / 2)
+                    y1 = int(height * (1 - roi_size) / 2)
+                    x2 = int(width * (1 + roi_size) / 2)
+                    y2 = int(height * (1 + roi_size) / 2)
+                    roi = frame[y1:y2, x1:x2]
+                    
+                    # Prepare image for model
+                    roi = cv2.resize(roi, (224, 224))
+                    roi = roi / 255.0
+                    roi = np.expand_dims(roi, axis=0)
+                    
+                    # Get prediction
+                    prediction = model.predict(roi)[0][0]
+                    is_good_quality = prediction < 0.5
+                    confidence = 1 - prediction if is_good_quality else prediction
+                    
+                    # Store results
+                    predictions.append(is_good_quality)
+                    confidences.append(confidence)
+                    
+                    print(f"Angle {angle}°: {'Good' if is_good_quality else 'Bad'} quality ({confidence*100:.1f}%)")
+                    
+                except Exception as e:
+                    print(f"Error during prediction at {angle}°: {e}")
+        
+        # Process results if we have any predictions
+        if predictions:
+            good_count = sum(predictions)
+            bad_count = len(predictions) - good_count
+            
+            if good_count > bad_count:
+                final_quality = "Good"
+                avg_confidence = np.mean([conf for i, conf in enumerate(confidences) if predictions[i]])
+            elif bad_count > good_count:
+                final_quality = "Bad"
+                avg_confidence = np.mean([conf for i, conf in enumerate(confidences) if not predictions[i]])
+            else:
+                final_quality = "Good"  # Default to good in case of tie
+                avg_confidence = np.mean(confidences)
+            
+            result_text = f"{final_quality} Quality ({avg_confidence*100:.1f}%)"
+            if status_label:
+                status_label.config(text=f"Status: {result_text}")
+            print(f"Final quality assessment: {result_text}")
+            
+            # Actuate relay based on quality (example: activate for bad quality)
+            if final_quality == "Bad":
+                GPIO.output(relay_pin, GPIO.HIGH)
+                print("Actuating relay for bad quality")
+                time.sleep(1)  # Keep relay on for 1 second
+                GPIO.output(relay_pin, GPIO.LOW)
+        else:
+            if status_label:
+                status_label.config(text="Status: No valid predictions")
+    
     except Exception as e:
-        print(f"Error loading model: {e}")
-        TENSORFLOW_AVAILABLE = False
-else:
-    model = None
-    print("Running without TensorFlow model - detection functionality will be limited")
+        print(f"Error during servo scan: {e}")
+        if status_label:
+            status_label.config(text=f"Status: Error during scan - {str(e)}")
+    
+    finally:
+        # Always ensure we clean up properly
+        try:
+            # Return to home position
+            set_angle(0)
+            
+            # Ensure relay is off
+            GPIO.output(relay_pin, GPIO.LOW)
+            
+            # Update scanning state
+            scanning_complete = True
+            servo_started = False
+            
+            # Small delay before allowing next scan
+            time.sleep(1)
+            
+            # Update status and set last scan time
+            last_scan_time = time.time()
+            if status_label:
+                status_label.config(text=f"Status: Ready (cooldown for {SCAN_COOLDOWN}s)")
+            
+            # Schedule status update after cooldown
+            if 'root' in globals() and root is not None:
+                def update_status_after_cooldown():
+                    if status_label:
+                        status_label.config(text="Status: Ready")
+                root.after(SCAN_COOLDOWN * 1000, update_status_after_cooldown)
+                
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+            last_scan_time = time.time()  # Still update last_scan_time on error to prevent rapid retries
 
-# ------------------ GUI RESULT DISPLAY ------------------ #
-def show_result_gui(label, accuracy):
-    global gui_open
-    with gui_lock:
-        if gui_open:
-            return
-        gui_open = True
-
-    def on_close():
-        global gui_open
-        with gui_lock:
-            gui_open = False
-        result_root.destroy()
-
-    result_root = tk.Tk()
-    result_root.title("Classification Result")
-    tk.Label(result_root, text=f"Result: {label}", font=("Arial", 16)).pack(pady=10)
-    tk.Label(result_root, text=f"Confidence: {accuracy * 100:.2f}%", font=("Arial", 14)).pack(pady=10)
-    tk.Button(result_root, text="OK", command=on_close, font=("Arial", 12)).pack(pady=10)
-    result_root.protocol("WM_DELETE_WINDOW", on_close)
-    result_root.mainloop()
+# ------------------ DISTANCE MEASUREMENT ------------------ #
+def get_distance():
+    pulse_start = time.time()
+    pulse_end = time.time()
+    timeout = 0.1
+    try:
+        GPIO.output(TRIG, True)
+        time.sleep(0.00001)
+        GPIO.output(TRIG, False)
+        start_time = time.time()
+        while GPIO.input(ECHO) == 0 and (time.time() - start_time) < timeout:
+            pulse_start = time.time()
+        start_time = time.time()
+        while GPIO.input(ECHO) == 1 and (time.time() - start_time) < timeout:
+            pulse_end = time.time()
+        pulse_duration = pulse_end - pulse_start
+        distance = (pulse_duration * 34300) / 2
+        return round(distance, 2) if distance > 0 else None
+    except Exception as e:
+        print(f"Error in distance measurement: {e}")
+        return None
 
 # ------------------ DETECTION FUNCTION ------------------ #
 def detect_guyabano(frame, model):
     global last_detection_time
-    
-    # Make a copy of the frame to draw on
     processed_frame = frame.copy()
-    
-    # Get frame dimensions
     height, width = frame.shape[:2]
-    
-    # Define a region of interest (center 50% of the frame)
     roi_size = 0.5
     x1 = int(width * (1 - roi_size) / 2)
     y1 = int(height * (1 - roi_size) / 2)
     x2 = int(width * (1 + roi_size) / 2)
     y2 = int(height * (1 + roi_size) / 2)
-    
-    # Draw ROI rectangle for visualization
     cv2.rectangle(processed_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-    
-    # Only attempt prediction if TensorFlow is available
     if TENSORFLOW_AVAILABLE and model is not None:
         try:
-            # Get the ROI and process it for the model
             roi = frame[y1:y2, x1:x2]
             roi = cv2.resize(roi, (224, 224))
             roi = roi / 255.0
             roi = np.expand_dims(roi, axis=0)
-            
-            # Make prediction
             prediction = model.predict(roi)[0][0]
             accuracy = prediction if prediction > 0.5 else 1 - prediction
             label = "Bad Quality" if prediction > 0.5 else "Good Quality"
-            
-            # Add label and confidence to the frame
             label_text = f"{label} ({accuracy*100:.1f}%)"
-            cv2.putText(processed_frame, label_text, (x1, y1-10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            # Show GUI result if confidence is not high
-            if accuracy < 0.95:
-                Thread(target=show_result_gui, args=(label, accuracy)).start()
-            else:
-                print(f"Detected '{label}' with high confidence ({accuracy * 100:.2f}%)")
-                
-            # Object detected, reset the timer
+            cv2.putText(processed_frame, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             last_detection_time = time.time()
-                
         except Exception as e:
             print(f"Error during prediction: {e}")
-            cv2.putText(processed_frame, "Detection Error", (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-    
+            cv2.putText(processed_frame, "Detection Error", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
     return processed_frame
 
-# ------------------ CAMERA SETUP ------------------ #
-cap = cv2.VideoCapture(0)
-data=False
-
-# ------------------ CLEANUP FUNCTION ------------------ #
-def cleanup():
-    global program_running
-    program_running = False
-    print("Cleaning up resources...")
-    
-    try:
-        # Stop the motor
-        motor_stop()
+# ------------------ VIDEO FEED UPDATE FOR TKINTER ------------------ #
+def update_video_feed():
+    global program_running, video_label, cap, distance_label, status_label, servo_started, scanning_complete, last_detection_time, motor_running, last_scan_time
+    if program_running and cap is not None and cap.isOpened():
+        dist = get_distance()
+        if distance_label:
+            distance_label.config(text=f"Distance: {dist if dist is not None else '--'} cm")
         
-        # Stop PWM signals
-        if 'pwm' in globals():
-            pwm.ChangeDutyCycle(0)
-            pwm.stop()
+        ret, frame = cap.read()
+        if ret:
+            frame = cv2.resize(frame, (640, 480))
+            display_frame = frame.copy()
             
-        if 'motor_pwm' in globals():
-            motor_pwm.ChangeDutyCycle(0)
-            motor_pwm.stop()
-            
-        # Release camera if it's open
-        if 'cap' in globals() and cap.isOpened():
-            cap.release()
-            
-        # Clean up GPIO
-        GPIO.cleanup()
-        print("Cleanup complete.")
-        
-    except Exception as e:
-        print(f"Error during cleanup: {e}")
-    finally:
-        # Ensure GPIO cleanup happens even if there's an error
-        try:
-            if 'pwm' in globals():
-                pwm.stop()
-            if 'motor_pwm' in globals():
-                motor_pwm.stop()
-            GPIO.cleanup()
-        except:
-            pass
-
-# ------------------ DETECTION PROCESS ------------------ #
-def start_camera_detection():
-    global servo_started, scanning_complete, last_detection_time, program_running
-    try:
-        while program_running:
-            dist = get_distance()
- 
-            ret, frame = cap.read()
-            if not ret:
-                print("Error: Couldn't read frame")
-                break
-                
-            # Check for timeout (45 seconds without detection)
-            if last_detection_time is not None:  # Only check timeout if detection has started
-                current_time = time.time()
-                if current_time - last_detection_time > 45:
-                    print("No object detected for 45 seconds. Stopping program.")
+            # Only process motor control if we're not in the middle of a scan or in cooldown
+            current_time = time.time()
+            if not servo_started and not scanning_complete and (current_time - last_scan_time > SCAN_COOLDOWN):
+                if dist is not None and (dist <= 36 or dist >= 140):
                     motor_stop()
-                    print("Conveyor stopped due to timeout.")
-                    time.sleep(1)
-                    return
-
-            if dist <= 36 or dist >= 140:
-                motor_stop()
-                print("Object detected! Checking if it's a guyabano...")
-                last_detection_time = time.time()
-                rotate_servo_step_by_step()
-                # First check if it's a guyabano
-                is_guyabano = False
-                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                lower_red = np.array([0, 100, 100])
-                upper_red = np.array([10, 255, 255])
-                mask = cv2.inRange(hsv, lower_red, upper_red)
-                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                
-                for contour in contours:
-                    area = cv2.contourArea(contour)
-                    if area > 100:
-                        is_guyabano = True
-                        break
-                
-                if is_guyabano:
-                    print("Guyabano detected! Starting scanning process...")
-                    if not servo_started:
-                        # Process the frame with detect_guyabano and get the result
-                        frame = detect_guyabano(frame, model)
+                    status_label.config(text="Status: Object detected - Checking...")
+                    last_detection_time = time.time()
+                    
+                    # Check if it's a guyabano using color detection
+                    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                    lower_red = np.array([0, 100, 100])
+                    upper_red = np.array([10, 255, 255])
+                    mask = cv2.inRange(hsv, lower_red, upper_red)
+                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    is_guyabano = any(cv2.contourArea(c) > 100 for c in contours)
+                    
+                    if is_guyabano:
+                        status_label.config(text="Status: Guyabano detected - Analyzing quality...")
                         servo_started = True
                         scanning_complete = False
                         Thread(target=rotate_servo_step_by_step).start()
-                    
-                    if scanning_complete:
-                        scanning_complete = False
-                        print("Scan complete. Ready to continue.")
+                    else:
+                        status_label.config(text="Status: No guyabano detected. Continuing...")
+                        # Small delay before restarting motor to prevent rapid toggling
+                        time.sleep(1)
                         motor_forward(speed=70)
-                        time.sleep(2)
-                        
                 else:
-                    print("No guyabano detected. Continuing conveyor...")
-                    motor_forward(speed=70)
-                    time.sleep(2)
-            else:
-                motor_forward(speed=70)
-                
-            # Display the video feed
-            cv2.imshow('Camera Feed', frame)
-            
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+                    # Only move forward if we're not already moving
+                    if not motor_running:
+                        motor_forward(speed=70)
+            # If we're in the middle of a scan, ensure motor is stopped
+            elif servo_started and not scanning_complete:
+                motor_stop()
+            rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb_frame)
+            imgtk = ImageTk.PhotoImage(image=img)
+            video_label.imgtk = imgtk
+            video_label.configure(image=imgtk)
+    if program_running:
+        video_label.after(50, update_video_feed)
 
-    except KeyboardInterrupt:
-        print("Interrupted by user.")
-    finally:
-        cleanup()  # Ensure cleanup happens even if there's an error
+# ------------------ BUTTON CALLBACKS ------------------ #
+def start_detection():
+    global program_running, last_detection_time, start_button, stop_button, status_label
+    if not program_running:
+        program_running = True
+        last_detection_time = time.time()
+        if start_button and stop_button and status_label:
+            start_button.config(state=tk.DISABLED)
+            stop_button.config(state=tk.NORMAL)
+            status_label.config(text="Status: Detection started")
+        update_video_feed()
 
-# Add signal handler for graceful shutdown
-import signal
-def signal_handler(signum, frame):
-    print("\nReceived signal to terminate. Cleaning up...")
-    cleanup()
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
-# ------------------ GUI BUTTON FUNCTIONS ------------------ #
-def on_start():
-    global last_detection_time, program_running
-    program_running = True
-    last_detection_time = time.time()  # Initialize timeout counter when start button is clicked
-    start_button.config(state=tk.DISABLED)
-    Thread(target=start_camera_detection, daemon=True).start()
+def stop_detection():
+    global program_running
+    program_running = False
+    if start_button and stop_button and status_label:
+        start_button.config(state=tk.NORMAL)
+        stop_button.config(state=tk.DISABLED)
+        status_label.config(text="Status: Stopped")
+    motor_stop()
 
 def on_reset():
-    print("Resetting system...")
     global servo_started, scanning_complete, last_detection_time, motor_running
     servo_started = False
     scanning_complete = False
-    last_detection_time = None  # Reset the timeout counter
-    motor_running = False  # Reset motor state
-    # Return servo to starting position
+    last_detection_time = None
+    motor_running = False
     set_angle(0)
     GPIO.output(relay_pin, GPIO.LOW)
-    start_button.config(state=tk.NORMAL)
-    print("System reset complete.")
+    if start_button and stop_button and status_label:
+        start_button.config(state=tk.NORMAL)
+        stop_button.config(state=tk.DISABLED)
+        status_label.config(text="Status: Ready")
 
-def on_gui_close():
-    print("Exiting GUI and cleaning up resources...")
+def cleanup():
+    global program_running, cap
+    program_running = False
+    motor_stop()
+    try:
+        if pwm:
+            pwm.ChangeDutyCycle(0)
+            pwm.stop()
+        if motor_pwm:
+            motor_pwm.ChangeDutyCycle(0)
+            motor_pwm.stop()
+        if cap is not None and cap.isOpened():
+            cap.release()
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+    GPIO.cleanup()
+    if 'root' in globals() and root is not None:
+        root.quit()
+
+def on_closing():
     cleanup()
-    main_root.destroy()
+    if 'root' in globals() and root is not None:
+        root.destroy()
 
-def update_distance_label():
-    global distance_label
-    while True:
-        if distance_label is not None:
-            dist = get_distance()
-            distance_label.config(text=f"Distance: {dist:.1f} cm")
-        time.sleep(0.1)  # Update every 100ms
-
-# ------------------ MAIN GUI ------------------ #
-main_root = tk.Tk()
-main_root.title("Guyabano Detection System")
-main_root.geometry("300x300")
-
-tk.Label(main_root, text="Guyabano Detection", font=("Arial", 16)).pack(pady=20)
-
-distance_label = tk.Label(main_root, text="Distance: -- cm", font=("Arial", 14))
-distance_label.pack(pady=10)
-
-start_button = tk.Button(main_root, text="Start Process", font=("Arial", 14), command=on_start)
-start_button.pack(pady=10)
-
-reset_button = tk.Button(main_root, text="Reset", font=("Arial", 14), command=on_reset)
-reset_button.pack(pady=10)
-
-# Start the distance update thread
-distance_thread = Thread(target=update_distance_label, daemon=True)
-distance_thread.start()
-
-main_root.protocol("WM_DELETE_WINDOW", on_gui_close)
-main_root.mainloop()
+# ------------------ MAIN APPLICATION ------------------ #
+if __name__ == "__main__":
+    try:
+        model = load_model('model.h5') if TENSORFLOW_AVAILABLE and os.path.exists('model.h5') else None
+        if model is None and TENSORFLOW_AVAILABLE:
+            print("Warning: Could not load model. Using color-based detection only.")
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            print("Error: Could not open camera")
+            sys.exit(1)
+        root = tk.Tk()
+        root.title("Guyabano Detection System")
+        screen_width = root.winfo_screenwidth()
+        screen_height = root.winfo_screenheight()
+        window_width = min(800, int(screen_width * 0.9))
+        window_height = min(600, int(screen_height * 0.9))
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        root.minsize(640, 480)
+        main_frame = ttk.Frame(root, padding="5")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(0, weight=1)
+        main_frame.rowconfigure(1, weight=0)
+        main_frame.rowconfigure(2, weight=0)
+        video_frame = ttk.LabelFrame(main_frame, text="Camera Feed", padding="2")
+        video_frame.grid(row=0, column=0, sticky='nsew', padx=2, pady=(2, 5))
+        video_label = ttk.Label(video_frame)
+        video_label.pack(fill=tk.BOTH, expand=True)
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=1, column=0, sticky='ew', padx=2, pady=2)
+        start_button = ttk.Button(button_frame, text="Start", command=start_detection, width=10)
+        start_button.pack(side=tk.LEFT, padx=5, pady=2)
+        stop_button = ttk.Button(button_frame, text="Stop", command=stop_detection, state=tk.DISABLED, width=10)
+        stop_button.pack(side=tk.LEFT, padx=5, pady=2)
+        reset_button = ttk.Button(button_frame, text="Reset", command=on_reset, width=10)
+        reset_button.pack(side=tk.LEFT, padx=5, pady=2)
+        status_frame = ttk.Frame(main_frame, height=24, relief=tk.SUNKEN)
+        status_frame.grid(row=2, column=0, sticky='ew', padx=2, pady=(0, 2))
+        status_frame.grid_propagate(False)
+        distance_label = ttk.Label(status_frame, text="Distance: -- cm", padding=(5, 2))
+        distance_label.pack(side=tk.LEFT, fill=tk.Y)
+        ttk.Separator(status_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
+        status_label = ttk.Label(status_frame, text="Status: Ready", padding=(5, 2))
+        status_label.pack(side=tk.LEFT, fill=tk.Y)
+        root.protocol("WM_DELETE_WINDOW", on_closing)
+        root.mainloop()
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        cleanup()
 
