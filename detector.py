@@ -389,19 +389,7 @@ def check_inactivity():
         # Update the program state first
         program_running = False
         
-        # Stop the motor directly with force
-        try:
-            print("Force stopping motor...")
-            motor_pwm.ChangeDutyCycle(0)
-            GPIO.output(motor_in1, GPIO.LOW)
-            GPIO.output(motor_in2, GPIO.LOW)
-            GPIO.output(relay_pin, GPIO.HIGH)
-            motor_running = False
-            print("Motor force stopped")
-        except Exception as e:
-            print(f"Error during motor stop: {e}")
-        
-        # Call on_stop for cleanup
+        # Call on_stop for cleanup - let it handle the motor stop
         on_stop()
         
         # Update UI
@@ -459,8 +447,8 @@ def update_video_feed():
             
             # Only process if not in the middle of a scan and cooldown has elapsed
             if not servo_started and not scanning_complete and cooldown_elapsed:
-                # If no object detected and motor isn't running, start the motor
-                if dist is not None and (dist > 36 and dist < 140) and not motor_running:
+                # If no object detected, motor isn't running, and program is running, start the motor
+                if program_running and dist is not None and (dist > 36 and dist < 140) and not motor_running:
                     motor_forward(speed=70)
                 # If object detected, stop and process it
                 elif dist is not None and (dist <= 36 or dist >= 140) and not servo_started:
